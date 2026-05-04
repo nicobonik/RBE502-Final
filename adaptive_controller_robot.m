@@ -38,14 +38,14 @@ q_dot_real(:, 1) = joint_readings(2, :)*factor_degre_to_rad;
 current_real(:, 1) = joint_readings(3, :)*factor_mA_to_A;
 
 %% Constants
-q1_desired = 0.0*ones(1, length(t));
-q2_desired = -0.0*ones(1, length(t));
-q3_desired =  -0.0*ones(1, length(t));
-q4_desired =  -0.0*ones(1, length(t));
+q1_desired = 0.5*ones(1, length(t));
+q2_desired = -0.35*ones(1, length(t));
+q3_desired =  0.3*ones(1, length(t));
+q4_desired =  0.15*ones(1, length(t));
 
 q_desired = [q1_desired; q2_desired; q3_desired; q4_desired];
 %% If you implement a full inverse dynamics controller you can define a desired velocity for each joint
-q_desired_dot = [0*q1_desired; 0*q2_desired; 0*q3_desired; 0*q4_desired];
+q_desired_dot = [0*q1_desired; 0*q2_desired; 0*q3_desired; 0*q4_desired];   
 
 %% System parameters
 R =load('Identification/identification_result.mat');

@@ -1,0 +1,156 @@
+%% OpenManipulator-X forward dynamics simulation
+clc, clear all, close all;
+
+%% Paths
+addpath("Communication_Code");
+addpath("generated_dynamics");
+
+%% Timing
+t_sample = 0.002;
+tfin = 10;
+t = 0:t_sample:tfin;
+N = length(t);
+
+
+%% State variables
+q = zeros(4, N+1);
+q_dot = zeros(4, N+1);
+tau_k = zeros(4, N);
+pi_k = zeros(16, N+1);
+dt = zeros(1, N);
+
+%% Desired states for each joint
+qd = [0.5; -0.35; 0.3; 0.15];
+dqd = [0; 0; 0; 0];
+ddqd = [0; 0; 0; 0];
+
+%% System parameters
+R =load('Identification/identification_result.mat');
+disp(R.p(1:6))
+p = [R.p(1:6); ...
+     R.x_opt_vec(1); R.x_opt_vec(2); R.x_opt_vec(3); R.x_opt_vec(4); ...
+     R.x_opt_vec(5); R.x_opt_vec(6); R.x_opt_vec(7); ...
+     R.x_opt_vec(8); R.x_opt_vec(9); R.x_opt_vec(10); ...
+     R.x_opt_vec(11); R.x_opt_vec(12); R.x_opt_vec(13); ...
+     R.x_opt_vec(14); R.x_opt_vec(15); R.x_opt_vec(16); ...
+     R.id_info.g];
+pf = [R.x_opt_vec(17); R.x_opt_vec(18); R.x_opt_vec(19); R.x_opt_vec(20)];
+
+p_true = p;
+p_true(11:22) = p_true(11:22)  * 1.3;
+
+q(:, 1) = [0.1 0.1 0.1 0]';
+pi_k(:, 1) = p(7:22);
+%% Main simulation loop
+
+%% Parameters
+% Joint natural frequencies (rad/s) - tune these
+omega = [5.0;    % joint 1 - base rotation   (large inertia ~0.011)
+         7.0;    % joint 2 - shoulder         (medium inertia ~0.046)
+         7.0;    % joint 3 - elbow            (small inertia ~0.008)
+         7.0];   % joint 4 - wrist            (tiny inertia ~0.0008)
+
+% Damping ratios per joint - tune these
+% 1.0 = critically damped, <1 = underdamped, >1 = overdamped
+zeta = [1.0;     % joint 1
+        1.2;     % joint 2
+        1.5;     % joint 3
+        1.0];    % joint 4
+
+% Inertia scaling at desired config
+M0 = M_fun(qd, p);
+m  = diag(M0);
+
+% Build gain matrices from per-joint parameters
+Kp     = diag(omega.^2       .* m);
+Kd     = diag(2*zeta.*omega  .* m);
+Gamma  = diag(0.05 * ones(16,1));  % adaptation - tune per parameter group
+
+%% Print effective bandwidths to verify
+fprintf('--- Effective bandwidths ---\n');
+for i = 1:4
+    bw = sqrt(Kp(i,i)/M0(i,i));
+    fprintf('Joint %d: omega=%.2f rad/s | Kp=%.4f | Kd=%.4f\n', ...
+        i, bw, Kp(i,i), Kd(i,i));
+end
+
+%% Initial conditions
+q(:,1)      = [0.1; 0.1; 0.1; 0.0];
+pi_k(:,1)   = p(7:22);
+
+%% Main loop
+for k = 1:N
+
+    q_k  = q(:,k);
+    dq_k = q_dot(:,k);
+    pi_k_now = pi_k(:,k);
+
+    %% Controller at current step (for storage)
+    [tau, pi_next] = adaptive_controller(p, q_k, qd, dq_k, dqd, ddqd, ...
+                                          pi_k_now, Kp, Kd, Gamma, t_sample);
+    tau_k(:,k)   = tau;
+    pi_k(:,k+1)  = pi_next;
+
+    %% RK4 - recompute tau at each substep
+    ctrl = @(x) adaptive_controller(p, x(1:4), qd, x(5:8), dqd, ddqd, ...
+                                     pi_k_now, Kp, Kd, Gamma, t_sample);
+
+    f = @(x) [ ...
+        x(5:8); ...
+        M_fun(x(1:4), p_true)*1.0 \ ( ...
+            ctrl(x) ...
+            - C_fun(x(1:4), x(5:8), p_true)*x(5:8) ...
+            - G_fun(x(1:4), p_true) ...
+            - ViscousFriction_fun(x(5:8), pf)*3.5 ...
+        ) ...
+    ];
+
+    %% Fixed timestep
+    h  = t_sample;
+    xk = [q_k; dq_k];
+
+    k1 = f(xk);
+    k2 = f(xk + 0.5*h*k1);
+    k3 = f(xk + 0.5*h*k2);
+    k4 = f(xk + h*k3);
+
+    x_next = xk + (h/6)*(k1 + 2*k2 + 2*k3 + k4);
+
+    q(:,k+1)     = x_next(1:4);
+    q_dot(:,k+1) = x_next(5:8);
+end
+
+E = repmat(qd, 1, N) - q(:,1:N);
+
+figure;
+for i = 1:4
+    subplot(4,1,i);
+    plot(t, q(i,1:N), 'b', t, qd(i)*ones(1,N), 'r--', 'LineWidth', 1.5);
+    ylabel(['q_' num2str(i) ' (rad)']);
+    legend('Actual','Desired'); grid on;
+end
+xlabel('Time (s)'); sgtitle('Joint Positions');
+
+figure;
+for i = 1:4
+    subplot(4,1,i);
+    plot(t, q_dot(i,1:N), 'b', 'LineWidth', 1.5);
+    ylabel(['\dot{q}_' num2str(i) ' (rad/s)']); grid on;
+end
+xlabel('Time (s)'); sgtitle('Joint Velocities');
+
+figure;
+for i = 1:4
+    subplot(4,1,i);
+    plot(t, E(i,:), 'r', 'LineWidth', 1.5);
+    ylabel(['e_' num2str(i) ' (rad)']); grid on;
+end
+xlabel('Time (s)'); sgtitle('Tracking Error');
+
+figure;
+for i = 1:4
+    subplot(4,1,i);
+    plot(t, tau_k(i,:), 'k', 'LineWidth', 1.5);
+    ylabel(['\tau_' num2str(i) ' (Nm)']); grid on;
+end
+xlabel('Time (s)'); sgtitle('Control Torques');
