@@ -44,35 +44,16 @@ pi_k(:, 1) = p(7:22);
 %% Main simulation loop
 
 %% Parameters
-% Joint natural frequencies (rad/s) - tune these
-omega = [5.0;    % joint 1 - base rotation   (large inertia ~0.011)
-         7.0;    % joint 2 - shoulder         (medium inertia ~0.046)
-         7.0;    % joint 3 - elbow            (small inertia ~0.008)
-         7.0];   % joint 4 - wrist            (tiny inertia ~0.0008)
 
-% Damping ratios per joint - tune these
-% 1.0 = critically damped, <1 = underdamped, >1 = overdamped
-zeta = [1.0;     % joint 1
-        1.2;     % joint 2
-        1.5;     % joint 3
-        1.0];    % joint 4
+lambda_joints = [5.0; 9.0; 7.0; 7.0];      % per-joint Lambda diagonal
+Lambda = diag(lambda_joints);
+Gamma  = diag(0.01 * ones(16,1));  % adaptation - tune per parameter group
 
-% Inertia scaling at desired config
-M0 = M_fun(qd, p);
+M0 = M_fun(q(:, 1), p);
 m  = diag(M0);
+zeta = [1.0; 0.5; 1.0; 1.0];
+Kd   = diag(2 * zeta .* lambda_joints .* m);
 
-% Build gain matrices from per-joint parameters
-Kp     = diag(omega.^2       .* m);
-Kd     = diag(2*zeta.*omega  .* m);
-Gamma  = diag(0.05 * ones(16,1));  % adaptation - tune per parameter group
-
-%% Print effective bandwidths to verify
-fprintf('--- Effective bandwidths ---\n');
-for i = 1:4
-    bw = sqrt(Kp(i,i)/M0(i,i));
-    fprintf('Joint %d: omega=%.2f rad/s | Kp=%.4f | Kd=%.4f\n', ...
-        i, bw, Kp(i,i), Kd(i,i));
-end
 
 %% Initial conditions
 q(:,1)      = [0.1; 0.1; 0.1; 0.0];
@@ -87,21 +68,22 @@ for k = 1:N
 
     %% Controller at current step (for storage)
     [tau, pi_next] = adaptive_controller(p, q_k, qd, dq_k, dqd, ddqd, ...
-                                          pi_k_now, Kp, Kd, Gamma, t_sample);
+                                          pi_k_now, Kd, Lambda, Gamma, t_sample);
     tau_k(:,k)   = tau;
     pi_k(:,k+1)  = pi_next;
 
     %% RK4 - recompute tau at each substep
-    ctrl = @(x) adaptive_controller(p, x(1:4), qd, x(5:8), dqd, ddqd, ...
-                                     pi_k_now, Kp, Kd, Gamma, t_sample);
+    ctrl = @(x) adaptive_controller( p,...
+        x(1:4), qd, x(5:8), dqd, ddqd, ...
+        pi_k(:,k), Kd, Lambda, Gamma, t_sample);
 
     f = @(x) [ ...
         x(5:8); ...
-        M_fun(x(1:4), p_true)*1.0 \ ( ...
+        M_fun(x(1:4), p_true) \ ( ...
             ctrl(x) ...
-            - C_fun(x(1:4), x(5:8), p_true)*x(5:8) ...
+            - C_fun(x(1:4), x(5:8), p_true) * x(5:8) ...
             - G_fun(x(1:4), p_true) ...
-            - ViscousFriction_fun(x(5:8), pf)*3.5 ...
+            - ViscousFriction_fun(x(5:8), pf) ...
         ) ...
     ];
 
@@ -154,3 +136,12 @@ for i = 1:4
     ylabel(['\tau_' num2str(i) ' (Nm)']); grid on;
 end
 xlabel('Time (s)'); sgtitle('Control Torques');
+
+figure;
+for i = 1:16
+    subplot(4,4,i);
+    plot(t, pi_k(i, 1:N), 'b', 'LineWidth', 1.5);
+    ylabel(['pi_{' num2str(i) '}']);
+    grid on;
+end
+sgtitle('Model Parameters');

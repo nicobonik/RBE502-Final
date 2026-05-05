@@ -1,54 +1,32 @@
-%% Setup robot
+%% OpenManipulator-X forward dynamics simulation
 clc, clear all, close all;
 
-%% Add Subfolder
+%% Paths
 addpath("Communication_Code");
-addpath("generated_dynamics")
+addpath("generated_dynamics");
 
-%% Define robot
-robot = Robot();
-
-%% Define the type of low level control of the robot this is current mode
-robot.writeMode('c');
-
-%% Define sample time
-t_sample = 0.04;
+%% Timing
+t_sample = 0.002;
 tfin = 10;
 t = 0:t_sample:tfin;
+N = length(t);
 
+
+%% State variables
+q = zeros(4, N+1);
+q_dot = zeros(4, N+1);
 tau_k = zeros(4, N);
 pi_k = zeros(16, N+1);
 dt = zeros(1, N);
 
-%% Factor from degres to rad
-factor_degre_to_rad = pi/180;
-factor_mA_to_A = 1/1000;
-factor_A_to_mA = 1000/1;
-
-%% Joint Positions
-q_real = zeros(4, length(t)+1);
-q_dot_real = zeros(4, length(t)+1);
-current_real = zeros(4, length(t)+1);
-
-
-%% Read Initial Conditions
-joint_readings = robot.getJointsReadings();
-q_real(:, 1) = joint_readings(1, :)*factor_degre_to_rad;
-q_dot_real(:, 1) = joint_readings(2, :)*factor_degre_to_rad;
-current_real(:, 1) = joint_readings(3, :)*factor_mA_to_A;
-
-%% Constants
-q1_desired = 0.5*ones(1, length(t));
-q2_desired = -0.35*ones(1, length(t));
-q3_desired =  0.3*ones(1, length(t));
-q4_desired =  0.15*ones(1, length(t));
-
-q_desired = [q1_desired; q2_desired; q3_desired; q4_desired];
-%% If you implement a full inverse dynamics controller you can define a desired velocity for each joint
-q_desired_dot = [0*q1_desired; 0*q2_desired; 0*q3_desired; 0*q4_desired];   
+%% Desired states for each joint
+qd = [0.5; -0.35; 0.3; 0.15];
+dqd = [0; 0; 0; 0];
+ddqd = [0; 0; 0; 0];
 
 %% System parameters
 R =load('Identification/identification_result.mat');
+disp(R.p(1:6))
 p = [R.p(1:6); ...
      R.x_opt_vec(1); R.x_opt_vec(2); R.x_opt_vec(3); R.x_opt_vec(4); ...
      R.x_opt_vec(5); R.x_opt_vec(6); R.x_opt_vec(7); ...
@@ -58,103 +36,190 @@ p = [R.p(1:6); ...
      R.id_info.g];
 pf = [R.x_opt_vec(17); R.x_opt_vec(18); R.x_opt_vec(19); R.x_opt_vec(20)];
 
+p_true = p;
+p_true(11:22) = p_true(11:22)  * 1.3;
+
+q(:, 1) = [0.1 0.1 0.1 0]';
+pi_k(:, 1) = p(7:22);
+
+q_top = deg2rad([0;  0; -45;  45]);   % EE at top of pole
+q_bot = deg2rad([0; 40;  45; -85]);   % EE at bottom of pole
+
+[qd_traj, dqd_traj, ddqd_traj, t, ee_desired] = generate_traj_NW(q_top, q_bot, p, t_sample, tfin, false);
+%% Main simulation loop
 
 %% Parameters
-% Joint natural frequencies (rad/s) - tune these
-omega = [5.0;    % joint 1 - base rotation   (large inertia ~0.011)
-         7.0;    % joint 2 - shoulder         (medium inertia ~0.046)
-         7.0;    % joint 3 - elbow            (small inertia ~0.008)
-         7.0];   % joint 4 - wrist            (tiny inertia ~0.0008)
 
-% Damping ratios per joint - tune these
-% 1.0 = critically damped, <1 = underdamped, >1 = overdamped
-zeta = [1.0;     % joint 1
-        1.2;     % joint 2
-        1.5;     % joint 3
-        1.0];    % joint 4
+lambda_joints = [5.0; 9.0; 7.0; 7.0];      % per-joint Lambda diagonal
+Lambda = diag(lambda_joints);
+Gamma  = diag(0.01 * ones(16,1));  % adaptation - tune per parameter group
 
-% Inertia scaling at desired config
-M0 = M_fun(qd, p);
+M0 = M_fun(q(:, 1), p);
 m  = diag(M0);
+zeta = [1.0; 0.5; 1.0; 1.0];
+Kd   = diag(2 * zeta .* lambda_joints .* m);
 
-% Build gain matrices from per-joint parameters
-Kp     = diag([1, 1, 0.5, 0.2]);
-Kd     = diag([0.1, 0.1, 0.1, 0.1]);
-Gamma  = diag(0.05 * ones(16,1));  % adaptation
 
-%% Control Loop
-for k = 1:length(t) 
-    tic
-    %% Create Control Law Your Controller goes Here
-    [tau, pi_hat_next] = adaptive_controller(p, q_real(:, k), q_desired, q_dot_real(:, k), q_desired_dot, [0;0;0;0], pi_k(:,k), Kp, Kd, Gamma, t_sample);
-    tau_k(:, k) = tau;
-    pi_k(:, k+1) = pi_hat_next;
-    torques = [tau_k(1, k), tau_k(2, k), tau_k(3, k), tau_k(4, k)];
-    %% This is the mapping to Amperes
-    current = torque_to_current(torques);
+%% Initial conditions
+q(:,1)      = q_top;
+pi_k(:,1)   = p(7:22);
 
-    %% This is the mapping to mA
-    current_mA = current*factor_A_to_mA;
+%% Main loop
+for k = 1:N
 
-    robot.writeCurrents(current_mA);
+   q_k  = q(:,k);
+    dq_k = q_dot(:,k);
 
-    while toc < t_sample
-    end
-    %% Sample time
-    dt(k) = toc;
+    % Current desired state from trajectory
+    qd_k   = qd_traj(:,k);
+    dqd_k  = dqd_traj(:,k);
+    ddqd_k = ddqd_traj(:,k);
 
-    %% Update measurements
-    joint_readings = robot.getJointsReadings();
-    q_real(:, k+1) = joint_readings(1, :)*factor_degre_to_rad;
-    q_dot_real(:, k+1) = joint_readings(2, :)*factor_degre_to_rad;
-    current_real(:, k+1) = joint_readings(3, :)*factor_mA_to_A;
+    % Adaptive controller with time-varying desired trajectory
+    [tau, pi_next] = adaptive_controller(p, q_k, qd_k, dq_k, ...
+                                          dqd_k, ddqd_k, pi_k(:,k), ...
+                                          Kd, Lambda, Gamma, t_sample);
+    tau_k(:,k)   = tau;
+    pi_k(:,k+1)  = pi_next;
 
+    %% RK4 - recompute tau at each substep
+    ctrl = @(x) adaptive_controller(p, x(1:4), qd_k, x(5:8), dqd_k, ddqd_k, ...
+                                     pi_k(:, k), Kd, Lambda, Gamma, t_sample);
+
+    f = @(x) [ ...
+        x(5:8); ...
+        M_fun(x(1:4), p_true) \ ( ...
+            ctrl(x) ...
+            - C_fun(x(1:4), x(5:8), p_true)*x(5:8) ...
+            - G_fun(x(1:4), p_true) ...
+            - ViscousFriction_fun(x(5:8), pf) ...
+        ) ...
+    ];
+
+    %% Fixed timestep
+    h  = t_sample;
+    xk = [q_k; dq_k];
+
+    k1 = f(xk);
+    k2 = f(xk + 0.5*h*k1);
+    k3 = f(xk + 0.5*h*k2);
+    k4 = f(xk + h*k3);
+
+    x_next = xk + (h/6)*(k1 + 2*k2 + 2*k3 + k4);
+
+    q(:,k+1)     = x_next(1:4);
+    q_dot(:,k+1) = x_next(5:8);
 end
 
-%% Save data histories at sample k
-q_real_k = q_real(:, 1:length(t));
-q_dot_real_k = q_dot_real(:, 1:length(t));
-current_real_k = current_real(:, 1:length(t));
+E = repmat(qd, 1, N) - q(:,1:N);
 
-%% Final Values
-tau = [0,0,0,0];
-current = tau;
-robot.writeCurrents(current); % Write joints to zero position
-disp("Movement Complete")
+ee_actual = zeros(3, N);
+for k = 1:N
+    ee_actual(:,k) = FK_fun(q(:,k), p);
+end
 
-figure(1)
-q_desired = [q1_desired; q2_desired; q3_desired; q4_desired];
-tau_all = tau_k;
-
-figure(1)
+figure;
 for i = 1:4
-    subplot(2,2,i)
-    plot(t, q_desired(i,:), 'r.')
-    hold on
-    plot(t, q_real(i,1:length(t)), 'b.')
-    xlabel('Time [s]')
-    ylabel(['q', num2str(i), ' [rad]'])
-    title(['Joint ', num2str(i), ' Angle'])
-    legend('Desired', 'Current', 'Location', 'best')
-    grid on
+    subplot(4,1,i);
+    plot(t, q(i,1:N), 'b', t, qd(i)*ones(1,N), 'r--', 'LineWidth', 1.5);
+    ylabel(['q_' num2str(i) ' (rad)']);
+    legend('Actual','Desired'); grid on;
 end
+xlabel('Time (s)'); sgtitle('Joint Positions');
 
-figure(2)
+figure;
 for i = 1:4
-    subplot(2,2,i)
-    plot(t, q_dot_real(i,1:length(t)), 'k.')
-    xlabel('Time [s]')
-    ylabel(['dq', num2str(i), ' [rad/s]'])
-    title(['Joint ', num2str(i), ' Velocity'])
-    grid on
+    subplot(4,1,i);
+    plot(t, q_dot(i,1:N), 'b', 'LineWidth', 1.5);
+    ylabel(['\dot{q}_' num2str(i) ' (rad/s)']); grid on;
 end
+xlabel('Time (s)'); sgtitle('Joint Velocities');
 
-figure(3)
+figure;
 for i = 1:4
-    subplot(2,2,i)
-    plot(t, tau_all(i,:), 'm.')
-    xlabel('Time [s]')
-    ylabel(['tau', num2str(i), ' [Nm]'])
-    title(['Joint ', num2str(i), ' Control Torque'])
-    grid on
+    subplot(4,1,i);
+    plot(t, E(i,:), 'r', 'LineWidth', 1.5);
+    ylabel(['e_' num2str(i) ' (rad)']); grid on;
 end
+xlabel('Time (s)'); sgtitle('Tracking Error');
+
+figure;
+for i = 1:4
+    subplot(4,1,i);
+    plot(t, tau_k(i,:), 'k', 'LineWidth', 1.5);
+    ylabel(['\tau_' num2str(i) ' (Nm)']); grid on;
+end
+xlabel('Time (s)'); sgtitle('Control Torques');
+
+%% Joint tracking
+figure;
+for i = 1:4
+    subplot(4,1,i);
+    plot(t, q(i,1:N),     'b',  'LineWidth', 1.5); hold on;
+    plot(t, qd_traj(i,:), 'r--','LineWidth', 1.5);
+    ylabel(['q_' num2str(i) ' (rad)']);
+    legend('Actual','Desired'); grid on;
+end
+sgtitle('Joint Position Tracking'); xlabel('Time (s)');
+
+figure;
+for i = 1:4
+    subplot(4,1,i);
+    plot(t, q_dot(i, 1:N), 'b', 'LineWidth', 1.5); hold on;
+    plot(t, dqd_traj(i, :), 'r--', 'LineWidth', 1.5);
+    ylabel(['dq_' num2str(i) ' (rad/s)']);
+    legend('Actual','Desired'); grid on;
+end
+sgtitle('Joint Velocity Tracking'); xlabel('Time (s)');
+
+figure;
+for i = 1:16
+    subplot(4,4,i);
+    plot(t, pi_k(i, 1:N), 'b', 'LineWidth', 1.5);
+    ylabel(['pi_{' num2str(i) '}']);
+    grid on;
+end
+sgtitle('Model Parameters');
+
+%% Cartesian tracking - most important for straight line
+figure;
+labels = {'X (m)', 'Y (m)', 'Z (m)'};
+for i = 1:3
+    subplot(3,1,i);
+    plot(t, ee_actual(i,:),  'b',  'LineWidth', 1.5); hold on;
+    plot(t, ee_desired(i,:), 'r--','LineWidth', 1.5);
+    ylabel(labels{i}); legend('Actual','Desired'); grid on;
+end
+sgtitle('End Effector Cartesian Tracking'); xlabel('Time (s)');
+
+% %% 3D trajectory visualization
+% figure;
+% plot3(ee_desired(1,:), ee_desired(2,:), ee_desired(3,:), ...
+%       'r--', 'LineWidth', 2); hold on;
+% plot3(ee_actual(1,:),  ee_actual(2,:),  ee_actual(3,:),  ...
+%       'b',   'LineWidth', 1.5);
+% xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)');
+% legend('Desired straight line', 'Actual path');
+% title('3D End Effector Path'); grid on; axis equal;
+
+figure;
+plot(ee_desired(1,:), ee_desired(3,:), ...
+     'r--', 'LineWidth', 2); hold on;
+plot(ee_actual(1,:),  ee_actual(3,:),  ...
+     'b',   'LineWidth', 1.5);
+scatter(ee_desired(1,1),   ee_desired(3,1),   100, 'g', 'filled');  % start
+scatter(ee_desired(1,end), ee_desired(3,end), 100, 'k', 'filled');  % end
+xlabel('X (m)'); ylabel('Z (m)');
+legend('Desired straight line', 'Actual path', 'Start', 'End');
+title('End Effector Path (X-Z Plane)'); 
+grid on; axis equal;
+
+
+%% Cartesian error - how straight is the line?
+cart_error = vecnorm(ee_actual - ee_desired, 2, 1);
+figure;
+plot(t, cart_error*1000, 'r', 'LineWidth', 1.5);
+xlabel('Time (s)'); ylabel('Cartesian Error (mm)');
+title('End Effector Path Error'); grid on;
+fprintf('Max cartesian error:  %.2f mm\n', max(cart_error)*1000);
+fprintf('Mean cartesian error: %.2f mm\n', mean(cart_error)*1000);
