@@ -6,10 +6,11 @@ function [tau, pi_hat_next] = adaptive_controller(p, q, qd, dq, dqd, ddqd, pi_ha
     de = dqd - dq;
 
     Y = Y_fun(q, dq, dqd, ddqd, p);
+    M = M_fun(q, p);
 
     % size(Y)
 
-    tau = Y*pi_hat + Kp*e + Kd*de;
+    tau = Y*pi_hat + M*Kp*e + M*Kd*de;
 
     pi_hat_next = pi_hat + Gamma*Y'*e*dt;
     % pi_hat_next = pi_hat;

@@ -8,22 +8,42 @@ addpath("generated_dynamics")
 %% Define robot
 robot = Robot();
 
+%% Factor from degres to rad
+factor_degre_to_rad = pi/180;
+factor_rad_to_degre = 180/pi;
+factor_mA_to_A = 1/1000;
+factor_A_to_mA = 1000/1;
+
+%% Do not decrease less than 1 since this can produce agressive movement
+travelTime = 4.0; 
+
+%% Define the type of low level controller, this is position control for each joint
+robot.writeMode('p');
+
+%% This defines the time for the interpolation.
+%% Yous shoudl define this if you are using position control
+robot.writeTime(travelTime); 
+
+%% Activate the torque
+robot.writeMotorState(true); 
+
+disp("Initializing...")
+
+%% Send zero to each joinfactor_rad_to_degret this is Home of the robot
+robot.writeJoints([0.1,0.1,0.1,0.0] * factor_rad_to_degre); 
+pause(travelTime); 
+
 %% Define the type of low level control of the robot this is current mode
 robot.writeMode('c');
 
 %% Define sample time
-t_sample = 0.04;
-tfin = 10;
+t_sample = 0.01;
+tfin = 7;
 t = 0:t_sample:tfin;
-
+N = length(t);
 tau_k = zeros(4, N);
 pi_k = zeros(16, N+1);
 dt = zeros(1, N);
-
-%% Factor from degres to rad
-factor_degre_to_rad = pi/180;
-factor_mA_to_A = 1/1000;
-factor_A_to_mA = 1000/1;
 
 %% Joint Positions
 q_real = zeros(4, length(t)+1);
@@ -61,32 +81,41 @@ pf = [R.x_opt_vec(17); R.x_opt_vec(18); R.x_opt_vec(19); R.x_opt_vec(20)];
 
 %% Parameters
 % Joint natural frequencies (rad/s) - tune these
-omega = [5.0;    % joint 1 - base rotation   (large inertia ~0.011)
-         7.0;    % joint 2 - shoulder         (medium inertia ~0.046)
-         7.0;    % joint 3 - elbow            (small inertia ~0.008)
-         7.0];   % joint 4 - wrist            (tiny inertia ~0.0008)
+omega = [9.0;    % joint 1 - base rotation   (large inertia ~0.011)
+         1.0;    % joint 2 - shoulder         (medium inertia ~0.046)
+         20.0;    % joint 3 - elbow            (small inertia ~0.008)
+         5.0];   % joint 4 - wrist            (tiny inertia ~0.0008)
 
 % Damping ratios per joint - tune these
 % 1.0 = critically damped, <1 = underdamped, >1 = overdamped
 zeta = [1.0;     % joint 1
-        1.2;     % joint 2
-        1.5;     % joint 3
+        1.0;     % joint 2
+        1.0;     % joint 3
         1.0];    % joint 4
 
 % Inertia scaling at desired config
-M0 = M_fun(qd, p);
+M0 = M_fun(q_desired(:, 1), p);
 m  = diag(M0);
 
 % Build gain matrices from per-joint parameters
-Kp     = diag(omega.^2       .* m);
-Kd     = diag(2*zeta.*omega  .* m);
-Gamma  = diag(0.05 * ones(16,1));  % adaptation
+% Kp     = diag(omega.^2       .* m);
+% Kd     = diag(2*zeta.*omega  .* m);
+wn_joints = [8, 9.5, 19, 8.5];
+Kp = [wn_joints(1)^2 0 0 0; 
+      0 wn_joints(2)^2 0 0; 
+      0 0 wn_joints(3)^2 0; 
+      0 0 0 wn_joints(4)^2];
+Kd = [2*wn_joints(1) 0 0 0;
+      0 2*wn_joints(2) 0 0;
+      0 0 2*wn_joints(3) 0;
+      0 0 0 2*wn_joints(4)];
+Gamma  = diag(0.2 * ones(16,1));  % adaptation
 
 %% Control Loop
 for k = 1:length(t) 
     tic
     %% Create Control Law Your Controller goes Here
-    [tau, pi_hat_next] = adaptive_controller(p, q_real(:, k), q_desired, q_dot_real(:, k), q_desired_dot, [0;0;0;0], pi_k(:,k), Kp, Kd, Gamma, t_sample);
+    [tau, pi_hat_next] = adaptive_controller(p, q_real(:, k), q_desired(:, k), q_dot_real(:, k), q_desired_dot(:, k), [0;0;0;0], pi_k(:,k), Kp, Kd, Gamma, t_sample);
     tau_k(:, k) = tau;
     pi_k(:, k+1) = pi_hat_next;
     torques = [tau_k(1, k), tau_k(2, k), tau_k(3, k), tau_k(4, k)];
